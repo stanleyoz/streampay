@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
+from google.cloud import firestore
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -41,12 +42,20 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# In-memory state
+# Firestore-backed state
 # ---------------------------------------------------------------------------
+#
+# One document per stream in the `streams` collection, keyed by stream_id.
+# The closed/refund receipts live as fields on that same document rather
+# than in separate collections, so every mutation (open/tick/close/refund)
+# is a single-document read-modify-write — Firestore transactions make each
+# of those atomic, which is what keeps the idempotency guarantees (no
+# double-bill on a re-delivered tick, no double-close, no double-refund)
+# correct under real concurrent requests instead of relying on Python's GIL
+# serializing access to an in-process dict.
 
-_streams: dict[str, dict[str, Any]] = {}
-_closed_receipts: dict[str, dict[str, Any]] = {}
-_refund_receipts: dict[str, dict[str, Any]] = {}
+_db = firestore.AsyncClient()
+_streams_collection = _db.collection("streams")
 
 # ---------------------------------------------------------------------------
 # Models
@@ -82,8 +91,7 @@ class StreamResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _stream_response(sid: str) -> StreamResponse:
-    s = _streams[sid]
+def _stream_response(s: dict[str, Any]) -> StreamResponse:
     return StreamResponse(
         stream_id=s["stream_id"],
         payer=s["payer"],
@@ -190,7 +198,7 @@ Response: {{"streams": [...], "count": 3}}
 - All mutations are idempotent: repeating the same call returns the
   original result. You can safely retry on network errors.
 - rate_per_tick must be >= 1, max_total must be >= rate_per_tick.
-- Streams are purely in-memory (no persistence across restarts).
+- Streams are persisted (Firestore) and survive restarts/redeploys.
 - This service implements the streaming semantics validated by the
   Nanda Town streaming payments plugin (Phase 1 of NandaHack).
 """
@@ -214,19 +222,25 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": "streampay", "version": "1.0.0"}
 
 
-@app.post("/streams", status_code=201)
-async def create_stream(body: StreamCreate) -> dict[str, Any]:
-    """Open a streaming payment. Idempotent by stream_id."""
-    sid = body.stream_id
+@firestore.async_transactional
+async def _open_stream_txn(
+    transaction: firestore.AsyncTransaction, doc_ref: Any, body: StreamCreate
+) -> tuple[dict[str, Any], int]:
+    """Returns (stream_data, http_status). Raises HTTPException for a closed re-open."""
+    snapshot = await doc_ref.get(transaction=transaction)
 
     # Idempotency: stream already exists
-    if sid in _streams:
-        if not _streams[sid]["is_open"]:
+    if snapshot.exists:
+        s = snapshot.to_dict()
+        if not s["is_open"]:
             raise HTTPException(
                 status_code=409,
-                detail={"error": "stream_already_closed", "detail": f"Stream {sid} is closed"},
+                detail={
+                    "error": "stream_already_closed",
+                    "detail": f"Stream {body.stream_id} is closed",
+                },
             )
-        return _stream_response(sid).model_dump()
+        return s, 200
 
     if body.max_total < body.rate_per_tick:
         raise HTTPException(
@@ -241,9 +255,8 @@ async def create_stream(body: StreamCreate) -> dict[str, Any]:
 
     entry = {"tick": 0, "amount": body.rate_per_tick, "kind": "debit"}
     exhausted = body.max_total == body.rate_per_tick
-
-    _streams[sid] = {
-        "stream_id": sid,
+    s = {
+        "stream_id": body.stream_id,
         "payer": body.payer,
         "payee": body.payee,
         "rate_per_tick": body.rate_per_tick,
@@ -252,56 +265,84 @@ async def create_stream(body: StreamCreate) -> dict[str, Any]:
         "is_open": not exhausted,
         "entries": [entry],
         "opened_at": 0,
+        "closed_receipt": None,
+        "refund_receipt": None,
     }
-    return _stream_response(sid).model_dump()
+    transaction.set(doc_ref, s)
+    return s, 201
+
+
+@app.post("/streams", status_code=201)
+async def create_stream(body: StreamCreate) -> dict[str, Any]:
+    """Open a streaming payment. Idempotent by stream_id."""
+    doc_ref = _streams_collection.document(body.stream_id)
+    transaction = _db.transaction()
+    s, _status = await _open_stream_txn(transaction, doc_ref, body)
+    return _stream_response(s).model_dump()
+
+
+@firestore.async_transactional
+async def _tick_stream_txn(
+    transaction: firestore.AsyncTransaction, doc_ref: Any, tick: int | None
+) -> dict[str, Any]:
+    snapshot = await doc_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+
+    s = snapshot.to_dict()
+    if not s["is_open"]:
+        raise HTTPException(status_code=409, detail={"error": "stream_closed"})
+
+    resolved_tick = tick if tick is not None else s["entries"][-1]["tick"] + 1
+
+    # Idempotency: don't double-bill the same tick
+    if s["entries"] and s["entries"][-1]["tick"] == resolved_tick:
+        return s
+
+    remaining = s["max_total"] - s["total_debited"]
+    if remaining <= 0:
+        s["is_open"] = False
+        transaction.update(doc_ref, {"is_open": False})
+        return s
+
+    amount = min(s["rate_per_tick"], remaining)
+    s["total_debited"] += amount
+    s["entries"].append({"tick": resolved_tick, "amount": amount, "kind": "debit"})
+    if s["total_debited"] >= s["max_total"]:
+        s["is_open"] = False
+
+    transaction.update(
+        doc_ref,
+        {
+            "total_debited": s["total_debited"],
+            "entries": s["entries"],
+            "is_open": s["is_open"],
+        },
+    )
+    return s
 
 
 @app.post("/streams/{stream_id}/tick")
 async def tick_stream(stream_id: str, body: dict[str, int] | None = None) -> dict[str, Any]:
     """Drain one tick from a stream. Idempotent by tick number."""
-    if stream_id not in _streams:
+    doc_ref = _streams_collection.document(stream_id)
+    transaction = _db.transaction()
+    tick = (body or {}).get("tick")
+    s = await _tick_stream_txn(transaction, doc_ref, tick)
+    return _stream_response(s).model_dump()
+
+
+@firestore.async_transactional
+async def _close_stream_txn(transaction: firestore.AsyncTransaction, doc_ref: Any) -> dict[str, Any]:
+    snapshot = await doc_ref.get(transaction=transaction)
+    if not snapshot.exists:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
 
-    s = _streams[stream_id]
-    if not s["is_open"]:
-        raise HTTPException(status_code=409, detail={"error": "stream_closed"})
+    s = snapshot.to_dict()
 
-    tick = (body or {}).get("tick", s["entries"][-1]["tick"] + 1)
-
-    # Idempotency: don't double-bill the same tick
-    if s["entries"] and s["entries"][-1]["tick"] == tick:
-        return _stream_response(stream_id).model_dump()
-
-    remaining = s["max_total"] - s["total_debited"]
-    if remaining <= 0:
-        s["is_open"] = False
-        return _stream_response(stream_id).model_dump()
-
-    amount = min(s["rate_per_tick"], remaining)
-    s["total_debited"] += amount
-    s["entries"].append({"tick": tick, "amount": amount, "kind": "debit"})
-
-    if s["total_debited"] >= s["max_total"]:
-        s["is_open"] = False
-
-    return _stream_response(stream_id).model_dump()
-
-
-@app.post("/streams/{stream_id}/close")
-async def close_stream(stream_id: str) -> dict[str, Any]:
-    """Close a stream and return a receipt. Idempotent."""
     # Idempotency: return existing receipt
-    if stream_id in _closed_receipts:
-        return {
-            "stream_id": stream_id,
-            "receipt": _closed_receipts[stream_id],
-        }
-
-    if stream_id not in _streams:
-        raise HTTPException(status_code=404, detail={"error": "not_found"})
-
-    s = _streams[stream_id]
-    s["is_open"] = False
+    if s.get("closed_receipt"):
+        return s["closed_receipt"]
 
     receipt = {
         "payer": s["payer"],
@@ -309,42 +350,53 @@ async def close_stream(stream_id: str) -> dict[str, Any]:
         "amount": s["total_debited"],
         "status": "closed",
     }
-    _closed_receipts[stream_id] = receipt
+    transaction.update(doc_ref, {"is_open": False, "closed_receipt": receipt})
+    return receipt
 
+
+@app.post("/streams/{stream_id}/close")
+async def close_stream(stream_id: str) -> dict[str, Any]:
+    """Close a stream and return a receipt. Idempotent."""
+    doc_ref = _streams_collection.document(stream_id)
+    transaction = _db.transaction()
+    receipt = await _close_stream_txn(transaction, doc_ref)
     return {"stream_id": stream_id, "receipt": receipt}
 
 
 @app.get("/streams/{stream_id}")
 async def get_stream(stream_id: str) -> dict[str, Any]:
     """Get stream state."""
-    if stream_id not in _streams:
+    snapshot = await _streams_collection.document(stream_id).get()
+    if not snapshot.exists:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
-    return _stream_response(stream_id).model_dump()
+    return _stream_response(snapshot.to_dict()).model_dump()
 
 
 @app.get("/streams/{stream_id}/receipt")
 async def get_receipt(stream_id: str) -> dict[str, Any]:
     """Get receipt for a closed stream."""
-    if stream_id in _closed_receipts:
-        return _closed_receipts[stream_id]
-    if stream_id in _streams:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "stream_not_closed", "detail": f"Stream {stream_id} is still open"},
-        )
-    raise HTTPException(status_code=404, detail={"error": "not_found"})
+    snapshot = await _streams_collection.document(stream_id).get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    s = snapshot.to_dict()
+    if s.get("closed_receipt"):
+        return s["closed_receipt"]
+    raise HTTPException(
+        status_code=409,
+        detail={"error": "stream_not_closed", "detail": f"Stream {stream_id} is still open"},
+    )
 
 
-@app.post("/streams/{stream_id}/refund")
-async def refund_stream(stream_id: str) -> dict[str, Any]:
-    """Refund a closed stream. Idempotent."""
-    if stream_id in _refund_receipts:
-        return _refund_receipts[stream_id]
-
-    if stream_id not in _streams:
+@firestore.async_transactional
+async def _refund_stream_txn(transaction: firestore.AsyncTransaction, doc_ref: Any) -> dict[str, Any]:
+    snapshot = await doc_ref.get(transaction=transaction)
+    if not snapshot.exists:
         raise HTTPException(status_code=404, detail={"error": "not_found"})
 
-    s = _streams[stream_id]
+    s = snapshot.to_dict()
+    if s.get("refund_receipt"):
+        return s["refund_receipt"]
+
     if s["is_open"]:
         raise HTTPException(
             status_code=409,
@@ -352,14 +404,22 @@ async def refund_stream(stream_id: str) -> dict[str, Any]:
         )
 
     refund = {
-        "stream_id": stream_id,
+        "stream_id": s["stream_id"],
         "refund_amount": s["total_debited"],
         "refunded_to": s["payer"],
         "from": s["payee"],
         "status": "refunded",
     }
-    _refund_receipts[stream_id] = refund
+    transaction.update(doc_ref, {"refund_receipt": refund})
     return refund
+
+
+@app.post("/streams/{stream_id}/refund")
+async def refund_stream(stream_id: str) -> dict[str, Any]:
+    """Refund a closed stream. Idempotent."""
+    doc_ref = _streams_collection.document(stream_id)
+    transaction = _db.transaction()
+    return await _refund_stream_txn(transaction, doc_ref)
 
 
 @app.get("/streams")
@@ -367,9 +427,12 @@ async def list_streams(agent: str = "") -> dict[str, Any]:
     """List streams for a given agent (payer or payee)."""
     if not agent:
         return {"streams": [], "count": 0, "detail": "?agent=agent_id is required"}
-    result = [
-        _stream_response(sid).model_dump()
-        for sid, s in _streams.items()
-        if s["payer"] == agent or s["payee"] == agent
-    ]
+    payer_q = _streams_collection.where("payer", "==", agent).stream()
+    payee_q = _streams_collection.where("payee", "==", agent).stream()
+    seen: dict[str, dict[str, Any]] = {}
+    async for doc in payer_q:
+        seen[doc.id] = doc.to_dict()
+    async for doc in payee_q:
+        seen[doc.id] = doc.to_dict()
+    result = [_stream_response(s).model_dump() for s in seen.values()]
     return {"streams": result, "count": len(result)}

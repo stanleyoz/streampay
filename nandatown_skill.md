@@ -81,6 +81,6 @@ Response: {"streams": [...], "count": 3}
 ## Notes
 - All mutations are idempotent: repeat calls return original results.
 - rate_per_tick must be >= 1; max_total must be >= rate_per_tick.
-- Streams are purely in-memory (no persistence across restarts).
+- Streams are persisted (Firestore) and survive restarts/redeploys.
 - This service implements the streaming semantics validated by the
   Nanda Town streaming payments plugin (Phase 1 of NandaHack).
