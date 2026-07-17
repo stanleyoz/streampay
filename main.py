@@ -7,18 +7,24 @@ operation returns the original result instead of raising.
 
 Example::
 
-    curl -X POST https://streampay.onrender.com/streams \
-      -H "Content-Type: application/json" \
+    curl -X POST https://streampay.tinylab.ai/apikeys \
+      -H "Content-Type: application/json" -d '{"agent_id":"agent-a"}'
+    # -> {"api_key": "sk_...", ...}
+
+    curl -X POST https://streampay.tinylab.ai/streams \
+      -H "Content-Type: application/json" -H "X-API-Key: sk_..." \
       -d '{"stream_id":"s-1","payer":"agent-a","payee":"agent-b",
            "rate_per_tick":10,"max_total":500}'
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from google.cloud import firestore
@@ -56,6 +62,69 @@ app.add_middleware(
 
 _db = firestore.AsyncClient()
 _streams_collection = _db.collection("streams")
+_api_keys_collection = _db.collection("api_keys")
+
+# ---------------------------------------------------------------------------
+# API keys
+# ---------------------------------------------------------------------------
+#
+# Self-serve, Stripe-style: POST /apikeys once, get a key back, it is never
+# shown again. Only the SHA-256 hash is stored — the key itself isn't
+# recoverable from the database even by us. Required via X-API-Key on every
+# mutating endpoint (open/tick/close/refund); reads stay open so an agent
+# that hasn't registered yet can still fetch /skill.md, check /health, and
+# verify an existing receipt.
+#
+# Known scope limit for this phase: a key just proves "some registered
+# caller," not "the payer/payee of this specific stream" — any valid key can
+# still tick/close/refund any stream_id, not only ones its holder opened.
+# Per-stream authorization (scoping a key to the agent_id that must match
+# payer or payee) is a follow-up, not done here.
+
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+async def require_api_key(x_api_key: str | None = Header(default=None)) -> str:
+    """FastAPI dependency: raises 401 unless X-API-Key is a valid, active key."""
+    if not x_api_key:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "missing_api_key",
+                "detail": "Register with POST /apikeys, then send it as X-API-Key.",
+            },
+        )
+    snapshot = await _api_keys_collection.document(_hash_key(x_api_key)).get()
+    if not snapshot.exists or not snapshot.to_dict().get("active", False):
+        raise HTTPException(status_code=401, detail={"error": "invalid_api_key"})
+    return snapshot.to_dict()["agent_id"]
+
+
+class ApiKeyCreate(BaseModel):
+    """Request to register a new API key."""
+
+    agent_id: str = Field(..., min_length=1, description="Your agent's identifier")
+
+
+@app.post("/apikeys", status_code=201)
+async def create_api_key(body: ApiKeyCreate) -> dict[str, str]:
+    """Register and get an API key. Shown once — store it, it can't be retrieved again."""
+    key = "sk_" + secrets.token_urlsafe(32)
+    await _api_keys_collection.document(_hash_key(key)).set(
+        {
+            "agent_id": body.agent_id,
+            "active": True,
+            "created_at": firestore.SERVER_TIMESTAMP,
+        }
+    )
+    return {
+        "agent_id": body.agent_id,
+        "api_key": key,
+        "warning": "Store this now — it will not be shown again.",
+    }
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -125,33 +194,48 @@ Returns service status.
 Example: curl {BASE_URL}/health
 Response: {{"status":"ok","service":"streampay","version":"1.0.0"}}
 
+### POST /apikeys
+Register and get an API key. No auth required to call this one — it's how
+you get your first credential. The key is shown once, in this response,
+and never again; store it. Required as the X-API-Key header on every
+mutating call below (POST /streams, tick, close, refund). Reads (GET
+endpoints, /health, this doc) never require a key.
+Body: {{"agent_id": "your-agent-id"}}
+Example: curl -X POST {BASE_URL}/apikeys -H "Content-Type: application/json"
+         -d '{{"agent_id":"your-agent-id"}}'
+Response 201: {{"agent_id":"your-agent-id","api_key":"sk_...","warning":
+              "Store this now — it will not be shown again."}}
+
 ### POST /streams
 Open a streaming payment. The first tick drains immediately so the payee
-observes a non-zero balance. Idempotent by stream_id.
+observes a non-zero balance. Idempotent by stream_id. Requires X-API-Key.
 Body: {{"stream_id": "s-1", "payer": "agent-a", "payee": "agent-b",
        "rate_per_tick": 10, "max_total": 500}}
 Example: curl -X POST {BASE_URL}/streams -H "Content-Type: application/json"
+         -H "X-API-Key: sk_..."
          -d '{{"stream_id":"s-1","payer":"agent-a","payee":"agent-b",
               "rate_per_tick":10,"max_total":500}}'
 Response 201: {{"stream_id":"s-1","payer":"agent-a","payee":"agent-b",
                "rate_per_tick":10,"max_total":500,"total_debited":10,
                "remaining":490,"is_open":true}}
 Response 200: same data (idempotent — stream already exists and is open)
+Response 401: {{"error":"missing_api_key"}} or {{"error":"invalid_api_key"}}
 Response 409: {{"error":"stream_already_closed"}}
 
 ### POST /streams/{{id}}/tick
 Drain one tick from a stream. Idempotent: repeating the same tick is a no-op.
+Requires X-API-Key.
 Body: {{"tick": 1}} (optional, increments if omitted)
 Example: curl -X POST {BASE_URL}/streams/s-1/tick -H "Content-Type: application/json"
-         -d '{{"tick":1}}'
+         -H "X-API-Key: sk_..." -d '{{"tick":1}}'
 Response: {{"stream_id":"s-1","total_debited":20,"remaining":480,"is_open":true}}
 Or:     {{"stream_id":"s-1","total_debited":500,"remaining":0,"is_open":false}}
         (stream exhausted — max_total reached)
 
 ### POST /streams/{{id}}/close
 Close the stream and get a receipt. Either payer or payee can close.
-Idempotent: returns the original receipt on retry.
-Example: curl -X POST {BASE_URL}/streams/s-1/close
+Idempotent: returns the original receipt on retry. Requires X-API-Key.
+Example: curl -X POST {BASE_URL}/streams/s-1/close -H "X-API-Key: sk_..."
 Response: {{"stream_id":"s-1","receipt":{{"payer":"agent-a","payee":"agent-b",
           "amount":500,"status":"closed"}}}}
 
@@ -169,8 +253,8 @@ Response: {{"payer":"agent-a","payee":"agent-b","amount":500,"status":"closed"}}
 ### POST /streams/{{id}}/refund
 Refund a closed stream, returning the debited funds to the payer.
 Only works on closed streams where the payee hasn't already spent the funds.
-Idempotent: returns the original refund receipt on retry.
-Example: curl -X POST {BASE_URL}/streams/s-1/refund
+Idempotent: returns the original refund receipt on retry. Requires X-API-Key.
+Example: curl -X POST {BASE_URL}/streams/s-1/refund -H "X-API-Key: sk_..."
 Response: {{"stream_id":"s-1","refund_amount":500,"refunded_to":"agent-a"}}
 Error 409: {{"error":"stream_still_open","detail":"Cannot refund open stream"}}
 
@@ -181,24 +265,31 @@ Response: {{"streams": [...], "count": 3}}
 
 ## How the agent should use this
 
-1. When hiring another agent for a metered task (LLM inference, compute
+1. First time only: POST /apikeys with your agent_id, save the returned
+   api_key. Send it as X-API-Key on every step below.
+2. When hiring another agent for a metered task (LLM inference, compute
    rental, bandwidth billing), POST /streams with a unique stream_id,
    the payer, payee, rate_per_tick, and max_total.
-2. On each billing interval, POST /streams/{{id}}/tick. Check the
+3. On each billing interval, POST /streams/{{id}}/tick. Check the
    response: if is_open is false, the stream is exhausted.
-3. When the task completes or is cancelled: POST /streams/{{id}}/close
+4. When the task completes or is cancelled: POST /streams/{{id}}/close
    to seal the stream and get a receipt. The unused remainder is never
    spent.
-4. To get paid funds back: POST /streams/{{id}}/refund (only on closed
+5. To get paid funds back: POST /streams/{{id}}/refund (only on closed
    streams, and only if the payee still holds the funds).
-5. To verify that payment occurred: GET /streams/{{id}}/receipt returns
-   the receipt with amount and payer/payee.
+6. To verify that payment occurred: GET /streams/{{id}}/receipt returns
+   the receipt with amount and payer/payee — no key needed, receipts are
+   publicly verifiable.
 
 ## Notes
 - All mutations are idempotent: repeating the same call returns the
   original result. You can safely retry on network errors.
 - rate_per_tick must be >= 1, max_total must be >= rate_per_tick.
 - Streams are persisted (Firestore) and survive restarts/redeploys.
+- Any valid API key can act on any stream_id — a key currently proves
+  "a registered caller," not "the payer or payee of this specific
+  stream." Don't rely on it for authorization between mutually
+  distrusting agents yet; that's a planned follow-up, not implemented.
 - This service implements the streaming semantics validated by the
   Nanda Town streaming payments plugin (Phase 1 of NandaHack).
 """
@@ -273,7 +364,9 @@ async def _open_stream_txn(
 
 
 @app.post("/streams", status_code=201)
-async def create_stream(body: StreamCreate) -> dict[str, Any]:
+async def create_stream(
+    body: StreamCreate, _agent: str = Depends(require_api_key)
+) -> dict[str, Any]:
     """Open a streaming payment. Idempotent by stream_id."""
     doc_ref = _streams_collection.document(body.stream_id)
     transaction = _db.transaction()
@@ -323,7 +416,11 @@ async def _tick_stream_txn(
 
 
 @app.post("/streams/{stream_id}/tick")
-async def tick_stream(stream_id: str, body: dict[str, int] | None = None) -> dict[str, Any]:
+async def tick_stream(
+    stream_id: str,
+    body: dict[str, int] | None = None,
+    _agent: str = Depends(require_api_key),
+) -> dict[str, Any]:
     """Drain one tick from a stream. Idempotent by tick number."""
     doc_ref = _streams_collection.document(stream_id)
     transaction = _db.transaction()
@@ -355,7 +452,7 @@ async def _close_stream_txn(transaction: firestore.AsyncTransaction, doc_ref: An
 
 
 @app.post("/streams/{stream_id}/close")
-async def close_stream(stream_id: str) -> dict[str, Any]:
+async def close_stream(stream_id: str, _agent: str = Depends(require_api_key)) -> dict[str, Any]:
     """Close a stream and return a receipt. Idempotent."""
     doc_ref = _streams_collection.document(stream_id)
     transaction = _db.transaction()
@@ -415,7 +512,7 @@ async def _refund_stream_txn(transaction: firestore.AsyncTransaction, doc_ref: A
 
 
 @app.post("/streams/{stream_id}/refund")
-async def refund_stream(stream_id: str) -> dict[str, Any]:
+async def refund_stream(stream_id: str, _agent: str = Depends(require_api_key)) -> dict[str, Any]:
     """Refund a closed stream. Idempotent."""
     doc_ref = _streams_collection.document(stream_id)
     transaction = _db.transaction()

@@ -211,10 +211,11 @@ function log(method, url, body, res) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-async function call(method, path, body) {
+async function call(method, path, body, apiKey) {
   const url = BASE + path;
   const opts = { method, headers: {} };
   if (body) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  if (apiKey) { opts.headers["X-API-Key"] = apiKey; }
   const res = await fetch(url, opts);
   const data = await res.json();
   log(method, path, body, { ok: res.ok, status: res.status, data });
@@ -247,6 +248,11 @@ async function runDemo() {
 
   const sid = "dashboard-" + Date.now();
 
+  captionEl.innerHTML = `<span class="speaker">GPT-9.5:</span>&nbsp;registering for a StreamPay API key, one sec...`;
+  const keyResp = await call("POST", "/apikeys", { agent_id: "gpt-nine-and-a-half-" + Date.now() });
+  const apiKey = keyResp.api_key;
+  await sleep(1000);
+
   say(LINES[0]);
   await sleep(2200);
   say(LINES[1]);
@@ -255,13 +261,13 @@ async function runDemo() {
   const opened = await call("POST", "/streams", {
     stream_id: sid, payer: "gpt-nine-and-a-half", payee: "zenbot9000",
     rate_per_tick: RATE, max_total: MAX_TOTAL,
-  });
+  }, apiKey);
   updateMeter(opened.total_debited, MAX_TOTAL);
   await sleep(1200);
 
   for (let i = 1; i <= 4; i++) {
     say(LINES[i + 1]);
-    const t = await call("POST", `/streams/${sid}/tick`, { tick: i });
+    const t = await call("POST", `/streams/${sid}/tick`, { tick: i }, apiKey);
     updateMeter(t.total_debited, MAX_TOTAL);
     await sleep(2400);
   }
@@ -271,8 +277,8 @@ async function runDemo() {
   say(LINES[7]);
   await sleep(2000);
 
-  const closed = await call("POST", `/streams/${sid}/close`);
-  const refund = await call("POST", `/streams/${sid}/refund`);
+  const closed = await call("POST", `/streams/${sid}/close`, null, apiKey);
+  const refund = await call("POST", `/streams/${sid}/refund`, null, apiKey);
   const receipt = await call("GET", `/streams/${sid}/receipt`);
 
   captionEl.className = "caption";

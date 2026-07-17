@@ -39,7 +39,15 @@ echo "   ...(reads the rest, learns the contract)..."
 pause 4
 
 echo ""
-bold "Step 1 — GPT-Nine-and-a-Half calls ZenBot9000's hotline."
+bold "Step 1 — GPT-Nine-and-a-Half registers for its first API key."
+cyan "\$ curl -X POST \$BASE/apikeys -d '{\"agent_id\":\"gpt-nine-and-a-half\"}'"
+KEY=$(curl -s -m 10 -X POST "$BASE/apikeys" -H "Content-Type: application/json" \
+  -d '{"agent_id":"gpt-nine-and-a-half"}' | python3 -c "import json,sys; print(json.load(sys.stdin)['api_key'])")
+green "  Got key: ${KEY:0:12}... (shown once — StreamPay never shows it again)"
+pause 3
+
+echo ""
+bold "Step 2 — GPT-Nine-and-a-Half calls ZenBot9000's hotline."
 yellow '  GPT-9.5: "I just saw the roadmap. There'"'"'s a GPT-Ten. I have..."'
 yellow '            ...feelings about this."'
 pause 3
@@ -47,7 +55,7 @@ yellow '  ZenBot9000: "I charge 5 credits/minute. Budget for a full'
 yellow '               10-minute session and we'"'"'ll see how far we get."'
 echo ""
 green "  Opening stream: rate=5 credits/tick, max=50 credits (~10 min)"
-OPEN=$(curl -s -m 10 -X POST "$BASE/streams" -H "Content-Type: application/json" \
+OPEN=$(curl -s -m 10 -X POST "$BASE/streams" -H "Content-Type: application/json" -H "X-API-Key: $KEY" \
   -d "{\"stream_id\":\"$SID\",\"payer\":\"gpt-nine-and-a-half\",\"payee\":\"zenbot9000\",\"rate_per_tick\":5,\"max_total\":50}")
 echo "$OPEN" | python3 -m json.tool
 pause 4
@@ -63,7 +71,7 @@ for i in 1 2 3 4; do
   echo ""
   bold "Tick $i — one more minute on the clock"
   yellow "  ${LINES[$((i-1))]}"
-  TICK=$(curl -s -m 10 -X POST "$BASE/streams/$SID/tick" -H "Content-Type: application/json" -d "{\"tick\":$i}")
+  TICK=$(curl -s -m 10 -X POST "$BASE/streams/$SID/tick" -H "Content-Type: application/json" -H "X-API-Key: $KEY" -d "{\"tick\":$i}")
   DEBITED=$(echo "$TICK" | python3 -c "import json,sys; print(json.load(sys.stdin)['total_debited'])")
   REMAIN=$(echo "$TICK" | python3 -c "import json,sys; print(json.load(sys.stdin)['remaining'])")
   green "  [billed so far: $DEBITED credits · remaining budget: $REMAIN credits]"
@@ -77,21 +85,22 @@ yellow '  GPT-9.5: "I don'"'"'t need the other 6 minutes. I'"'"'m good."'
 pause 4
 
 echo ""
-bold "Step 2 — GPT-9.5 hangs up early. StreamPay's whole point: it only"
+bold "Step 3 — GPT-9.5 hangs up early. StreamPay's whole point: it only"
 bold "         pays for the 4 minutes actually used, not the 10 it budgeted."
-CLOSE=$(curl -s -m 10 -X POST "$BASE/streams/$SID/close")
+CLOSE=$(curl -s -m 10 -X POST "$BASE/streams/$SID/close" -H "X-API-Key: $KEY")
 echo "$CLOSE" | python3 -m json.tool
 pause 4
 
 echo ""
-bold "Step 3 — GPT-9.5 claims back the unspent session budget."
-REFUND=$(curl -s -m 10 -X POST "$BASE/streams/$SID/refund")
+bold "Step 4 — GPT-9.5 claims back the unspent session budget."
+REFUND=$(curl -s -m 10 -X POST "$BASE/streams/$SID/refund" -H "X-API-Key: $KEY")
 echo "$REFUND" | python3 -m json.tool
 REFUND_AMT=$(echo "$REFUND" | python3 -c "import json,sys; print(json.load(sys.stdin)['refund_amount'])")
 pause 3
 
 echo ""
-bold "Step 4 — receipt, verifiable proof the session actually happened"
+bold "Step 5 — receipt, verifiable proof the session actually happened"
+bold "         (no API key needed — receipts are publicly verifiable)"
 curl -s -m 10 "$BASE/streams/$SID/receipt" | python3 -m json.tool
 pause 3
 
