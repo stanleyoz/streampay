@@ -4,15 +4,34 @@
 
 Hosted REST API for rate-limited, per-tick streaming payments between AI agents. Idempotency-keyed mutations, audit trail, receipt verification.
 
-## Quick Deploy (Render)
+## Live
 
-1. Go to [render.com](https://render.com) → New → Web Service
-2. Connect repo: `stanleyoz/nandatown`
-3. Configure:
-   - **Root Directory:** `streampay`
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
-4. Deploy → get URL (e.g. `https://streampay.onrender.com`)
+- API: https://streampay.tinylab.ai
+- SKILL.md: https://streampay.tinylab.ai/skill.md
+
+## Deploy (Cloud Run)
+
+```bash
+gcloud run deploy streampay \
+  --source=. \
+  --region=us-central1 \
+  --project=streampay-tinylab \
+  --allow-unauthenticated \
+  --set-env-vars=SKILL_BASE_URL=https://streampay.tinylab.ai
+
+gcloud beta run domain-mappings create \
+  --service=streampay \
+  --domain=streampay.tinylab.ai \
+  --region=us-central1 \
+  --project=streampay-tinylab
+```
+
+The domain mapping prints a CNAME (`streampay` → `ghs.googlehosted.com.`) to add
+at your DNS provider; Cloud Run issues the TLS cert automatically once that
+record resolves.
+
+Cloud Run's source deploy uses Buildpacks, which need the `Procfile` in this
+repo to know the app's start command — don't remove it.
 
 ## Endpoints
 
@@ -43,11 +62,12 @@ curl -X POST http://localhost:8000/streams/s-1/tick -H 'Content-Type: applicatio
 curl -X POST http://localhost:8000/streams/s-1/close
 ```
 
-## Phase 1 · Nanda Town Plugin
+## Nanda Town Plugin
 
-The streaming semantics are validated by the Phase 1 PR:
-https://github.com/projnanda/nandatown/pull/116
+The streaming semantics this API enforces at the HTTP layer are validated
+in-simulator by a companion plugin (idempotency keys, typed errors, audit
+trail, 7 adversarial validators) in `projnanda/nandatown`:
+https://github.com/projnanda/nandatown/pull/153
 
-That PR hardens `streaming.py` with idempotency keys, typed errors, audit trail,
-and 7 adversarial validators — the same invariants this Phase 2 API enforces
-at the HTTP layer.
+This service is intentionally standalone — no dependency on that repo — per
+review on that PR: the hosted API and its writeup live here instead.

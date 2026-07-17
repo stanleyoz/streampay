@@ -3,7 +3,7 @@
 # Just run: ./streampay/demo.sh
 
 set -e
-BASE="https://streampay.onrender.com"
+BASE="https://streampay.tinylab.ai"
 SID="demo-$(date +%s)"
 SEPARATOR="=============================================="
 
@@ -87,8 +87,8 @@ echo ""
 pause 6
 
 green "$SEPARATOR"
-green "  9 endpoints · idempotent · deployed on Render"
-green "  GitHub: github.com/stanleyoz/nandatown"
+green "  9 endpoints · idempotent · deployed on Cloud Run"
+green "  GitHub: github.com/stanleyoz/streampay"
 green "  Skills: nandatown.projectnanda.org/skills"
-green "  API:    streampay.onrender.com"
+green "  API:    streampay.tinylab.ai"
 green "$SEPARATOR"
