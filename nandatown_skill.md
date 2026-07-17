@@ -71,11 +71,14 @@ Example: curl https://streampay.tinylab.ai/streams/s-1/receipt
 Response: {"payer":"agent-a","payee":"agent-b","amount":500,"status":"closed"}
 
 ### POST /streams/{id}/refund
-Refund a closed stream, returning the debited funds to the payer.
-Only works on closed streams where the payee hasn't already spent the funds.
-Idempotent: returns the original refund receipt on retry. Requires X-API-Key.
-Example: curl -X POST https://streampay.tinylab.ai/streams/s-1/refund -H "X-API-Key: sk_..."
-Response: {"stream_id":"s-1","refund_amount":500,"refunded_to":"agent-a"}
+Refund the *unused remainder* of a closed stream's budget back to the payer
+(max_total minus total_debited) — the amount already debited was earned by
+the payee for service actually delivered and is never touched. Only works
+on closed streams. Idempotent: returns the original refund receipt on
+retry. Requires X-API-Key.
+Example: a stream with max_total=500 closed after total_debited=200 ->
+curl -X POST https://streampay.tinylab.ai/streams/s-1/refund -H "X-API-Key: sk_..."
+Response: {"stream_id":"s-1","refund_amount":300,"refunded_to":"agent-a"}
 Error 409: {"error":"stream_still_open","detail":"Cannot refund open stream"}
 
 ### GET /streams?agent={agent_id}
@@ -95,8 +98,9 @@ Response: {"streams": [...], "count": 3}
 4. When the task completes or is cancelled: POST /streams/{id}/close
    to seal the stream and get a receipt. The unused remainder is never
    spent.
-5. To get paid funds back: POST /streams/{id}/refund (only on closed
-   streams, and only if the payee still holds the funds).
+5. To recover the unused remainder of the budget: POST /streams/{id}/refund
+   (only on closed streams). Only ever returns max_total - total_debited —
+   the amount the payee actually earned is never reversed.
 6. To verify that payment occurred: GET /streams/{id}/receipt returns
    the receipt with amount and payer/payee — no key needed, receipts are
    publicly verifiable.
