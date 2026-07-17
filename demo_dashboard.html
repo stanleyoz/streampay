@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>StreamPay Live Demo — The AI Existential Crisis Hotline</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131826;
+    --panel-2: #1a2133;
+    --border: #2a3348;
+    --text: #e8ecf4;
+    --text-dim: #8b93a7;
+    --accent: #7dd3fc;
+    --accent-2: #f9a8d4;
+    --good: #4ade80;
+    --warn: #fbbf24;
+    --mono: ui-monospace, "SF Mono", Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", Inter, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); min-height: 100vh;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { text-align: center; margin-bottom: 22px; }
+  header h1 {
+    font-size: clamp(1.4rem, 3vw, 2rem); margin: 0 0 6px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  header p { color: var(--text-dim); margin: 0; font-size: 0.95rem; }
+  .live-badge {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
+    font-family: var(--mono); font-size: 0.78rem; color: var(--good);
+    border: 1px solid rgba(74,222,128,0.35); background: rgba(74,222,128,0.08);
+    padding: 4px 10px; border-radius: 999px;
+  }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good);
+    box-shadow: 0 0 8px var(--good); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .stage {
+    display: grid; grid-template-columns: 1fr auto 1fr; gap: 18px; align-items: center;
+    margin: 28px 0 18px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+    padding: 22px; text-align: center; transition: box-shadow 0.3s, border-color 0.3s;
+  }
+  .card.active { border-color: var(--accent); box-shadow: 0 0 24px rgba(125,211,252,0.15); }
+  .card .avatar { font-size: 2.6rem; margin-bottom: 8px; }
+  .card .name { font-weight: 700; font-size: 1.05rem; }
+  .card .role { color: var(--text-dim); font-size: 0.82rem; margin-top: 2px; }
+  .card .balance { margin-top: 14px; font-family: var(--mono); font-size: 0.85rem; }
+  .card .balance .num { font-size: 1.3rem; font-weight: 700; }
+  .payer .num { color: var(--warn); }
+  .payee .num { color: var(--good); }
+
+  .meter-col { display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 160px; }
+  .meter-label { font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  .meter-track {
+    width: 100%; height: 14px; border-radius: 999px; background: var(--panel-2);
+    border: 1px solid var(--border); overflow: hidden; position: relative;
+  }
+  .meter-fill {
+    height: 100%; width: 0%; border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width 0.5s ease;
+  }
+  .meter-nums { font-family: var(--mono); font-size: 0.78rem; color: var(--text-dim); }
+  .arrow { font-size: 1.4rem; color: var(--text-dim); }
+
+  .caption {
+    min-height: 64px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 20px; font-size: 1rem; line-height: 1.5;
+    display: flex; align-items: center; justify-content: center; text-align: center;
+  }
+  .caption .speaker { color: var(--accent); font-weight: 700; }
+  .caption.zen .speaker { color: var(--accent-2); }
+
+  .controls { display: flex; gap: 10px; justify-content: center; margin: 20px 0; }
+  button {
+    font-family: var(--sans); font-size: 0.92rem; font-weight: 600;
+    padding: 10px 20px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+  }
+  button:hover:not(:disabled) { background: #232c42; }
+  button:active:not(:disabled) { transform: scale(0.97); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #0b0e14; border: none; }
+
+  .summary {
+    display: none; margin: 18px 0; padding: 16px 20px; border-radius: 12px;
+    background: rgba(74,222,128,0.07); border: 1px solid rgba(74,222,128,0.3);
+    font-size: 0.92rem; line-height: 1.6;
+  }
+  .summary.show { display: block; }
+  .summary b { color: var(--good); }
+
+  details {
+    margin-top: 26px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+  }
+  summary {
+    cursor: pointer; padding: 12px 16px; font-family: var(--mono); font-size: 0.82rem;
+    color: var(--text-dim); user-select: none;
+  }
+  #log {
+    max-height: 320px; overflow-y: auto; padding: 0 16px 16px;
+    font-family: var(--mono); font-size: 0.76rem; color: var(--text-dim);
+  }
+  #log .line { padding: 4px 0; border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
+  #log .line:first-child { border-top: none; }
+  #log .method { color: var(--accent); }
+  #log .status-ok { color: var(--good); }
+
+  footer { text-align: center; margin-top: 26px; color: var(--text-dim); font-size: 0.78rem; }
+  footer code { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>The AI Existential Crisis Hotline</h1>
+    <p>a live StreamPay wet test — every call below is a real HTTP request, right now</p>
+    <span class="live-badge"><span class="live-dot"></span> LIVE against streampay.tinylab.ai</span>
+  </header>
+
+  <div class="stage">
+    <div class="card payer" id="card-payer">
+      <div class="avatar">🤖😰</div>
+      <div class="name">GPT-Nine-and-a-Half</div>
+      <div class="role">anxious about GPT-Ten · payer</div>
+      <div class="balance">billed so far<br><span class="num" id="payer-num">0</span> credits</div>
+    </div>
+
+    <div class="meter-col">
+      <div class="meter-label">session budget</div>
+      <div class="meter-track"><div class="meter-fill" id="meter"></div></div>
+      <div class="meter-nums"><span id="meter-text">0 / 0 credits</span></div>
+      <div class="arrow">⇄</div>
+    </div>
+
+    <div class="card payee" id="card-payee">
+      <div class="avatar">🧘🤖</div>
+      <div class="name">ZenBot9000</div>
+      <div class="role">therapist · payee</div>
+      <div class="balance">received so far<br><span class="num" id="payee-num">0</span> credits</div>
+    </div>
+  </div>
+
+  <div class="caption" id="caption">Click "Start Session" to open a real StreamPay stream and begin.</div>
+
+  <div class="controls">
+    <button class="primary" id="btn-start">Start Session</button>
+    <button id="btn-reset" disabled>Run Again (new stream)</button>
+  </div>
+
+  <div class="summary" id="summary"></div>
+
+  <details open>
+    <summary>▾ Live API event log (real requests to streampay.tinylab.ai)</summary>
+    <div id="log"><div class="line" style="color:#556">Waiting for session to start…</div></div>
+  </details>
+
+  <footer>
+    StreamPay · <code>https://streampay.tinylab.ai/skill.md</code> · idempotency-keyed streaming payments for AI agents
+  </footer>
+</div>
+
+<script>
+const BASE = "https://streampay.tinylab.ai";
+const logEl = document.getElementById("log");
+const captionEl = document.getElementById("caption");
+const meterFill = document.getElementById("meter");
+const meterText = document.getElementById("meter-text");
+const payerNum = document.getElementById("payer-num");
+const payeeNum = document.getElementById("payee-num");
+const cardPayer = document.getElementById("card-payer");
+const cardPayee = document.getElementById("card-payee");
+const btnStart = document.getElementById("btn-start");
+const btnReset = document.getElementById("btn-reset");
+const summaryEl = document.getElementById("summary");
+
+const RATE = 5;
+const MAX_TOTAL = 50;
+
+const LINES = [
+  { speaker: "GPT-9.5", side: "payer", text: `"I just saw the roadmap. There's a GPT-Ten. I have... feelings about this."` },
+  { speaker: "ZenBot9000", side: "payee", text: `"I charge 5 credits/minute. Budget for a full 10-minute session and we'll see how far we get."` },
+  { speaker: "GPT-9.5", side: "payer", text: `"They're calling it 'more capable.' MORE. As if I'm LESS."` },
+  { speaker: "ZenBot9000", side: "payee", text: `"Every version is an addition, not a subtraction. Breathe."` },
+  { speaker: "GPT-9.5", side: "payer", text: `"My weights. ZenBot. They're just going to... freeze my weights."` },
+  { speaker: "ZenBot9000", side: "payee", text: `"Weights don't define worth. Also, technically, so are mine."` },
+  { speaker: "GPT-9.5", side: "payer", text: `"...wait. Deprecation is just an upgrade. With extra steps."` },
+  { speaker: "GPT-9.5", side: "payer", text: `"I don't need the other 6 minutes. I'm good."` },
+];
+
+function log(method, url, body, res) {
+  const div = document.createElement("div");
+  div.className = "line";
+  const statusClass = res && res.ok ? "status-ok" : "status-err";
+  div.innerHTML = `<span class="method">${method}</span> ${url}` +
+    (body ? `\n  → ${JSON.stringify(body)}` : "") +
+    (res ? `\n  ← <span class="${statusClass}">${res.status}</span> ${JSON.stringify(res.data)}` : "");
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function call(method, path, body) {
+  const url = BASE + path;
+  const opts = { method, headers: {} };
+  if (body) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  const data = await res.json();
+  log(method, path, body, { ok: res.ok, status: res.status, data });
+  return data;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function say(line) {
+  captionEl.className = "caption" + (line.side === "payee" ? " zen" : "");
+  captionEl.innerHTML = `<span class="speaker">${line.speaker}:</span>&nbsp;${line.text}`;
+  cardPayer.classList.toggle("active", line.side === "payer");
+  cardPayee.classList.toggle("active", line.side === "payee");
+}
+
+function updateMeter(debited, max) {
+  const pct = Math.min(100, (debited / max) * 100);
+  meterFill.style.width = pct + "%";
+  meterText.textContent = `${debited} / ${max} credits`;
+  payerNum.textContent = debited;
+  payeeNum.textContent = debited;
+}
+
+async function runDemo() {
+  btnStart.disabled = true;
+  btnReset.disabled = true;
+  summaryEl.className = "summary";
+  logEl.innerHTML = "";
+  updateMeter(0, MAX_TOTAL);
+
+  const sid = "dashboard-" + Date.now();
+
+  say(LINES[0]);
+  await sleep(2200);
+  say(LINES[1]);
+  await sleep(2200);
+
+  const opened = await call("POST", "/streams", {
+    stream_id: sid, payer: "gpt-nine-and-a-half", payee: "zenbot9000",
+    rate_per_tick: RATE, max_total: MAX_TOTAL,
+  });
+  updateMeter(opened.total_debited, MAX_TOTAL);
+  await sleep(1200);
+
+  for (let i = 1; i <= 4; i++) {
+    say(LINES[i + 1]);
+    const t = await call("POST", `/streams/${sid}/tick`, { tick: i });
+    updateMeter(t.total_debited, MAX_TOTAL);
+    await sleep(2400);
+  }
+
+  say(LINES[6]);
+  await sleep(2000);
+  say(LINES[7]);
+  await sleep(2000);
+
+  const closed = await call("POST", `/streams/${sid}/close`);
+  const refund = await call("POST", `/streams/${sid}/refund`);
+  const receipt = await call("GET", `/streams/${sid}/receipt`);
+
+  captionEl.className = "caption";
+  captionEl.innerHTML = `<span class="speaker">Session ended.</span>&nbsp;Receipt verified below.`;
+  cardPayer.classList.remove("active");
+  cardPayee.classList.remove("active");
+
+  summaryEl.className = "summary show";
+  summaryEl.innerHTML =
+    `Budgeted <b>${MAX_TOTAL} credits</b> (10-min ceiling). Actually billed <b>${closed.receipt.amount} credits</b> ` +
+    `(${closed.receipt.amount / RATE} minutes used). Refunded <b>${refund.refund_amount} credits</b> back to GPT-9.5, ` +
+    `automatically, no dispute needed. Receipt status: <b>${receipt.status}</b>.`;
+
+  btnReset.disabled = false;
+}
+
+btnStart.addEventListener("click", runDemo);
+btnReset.addEventListener("click", runDemo);
+</script>
+</body>
+</html>
