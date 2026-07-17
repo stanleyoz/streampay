@@ -1,0 +1,36 @@
+name: streaming_rental
+description: "2 buyers renting metered services from 2 sellers via real streaming payments."
+
+tier: 1
+seed: 42
+
+task:
+  type: streaming_rental
+
+agents:
+  count: 4
+  brain: state-machine
+  roles:
+    - name: buyer
+      count: 2
+    - name: seller
+      count: 2
+
+layers:
+  transport: in_memory
+  comms: nest_native
+  identity: did_key
+  registry: in_memory
+  auth: jwt
+  trust: score_average
+  payments: streampay_http
+  coordination: contract_net
+  negotiation: alternating_offers
+  memory: blackboard
+  privacy: noop
+  datafacts: datafacts_v1
+
+duration: "ticks: 100"
+
+output:
+  trace: "./traces/streaming_rental.jsonl"

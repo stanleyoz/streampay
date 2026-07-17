@@ -1,0 +1,15 @@
+[project]
+name = "streampay-nest-bridge"
+version = "0.0.1"
+requires-python = ">=3.11"
+dependencies = ["httpx"]
+
+[project.entry-points."nest.plugins.payments"]
+streampay_http = "streampay_http:StreamPayHTTP"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["streampay_http"]
